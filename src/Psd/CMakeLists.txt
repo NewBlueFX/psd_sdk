@@ -96,6 +96,8 @@ set(psd_source_types
   PsdPlanarImage.h
   PsdSection.h
   PsdVectorMask.h
+  PsdText.h
+  PsdTextParser.h
 )
 
 set(psd_source_util

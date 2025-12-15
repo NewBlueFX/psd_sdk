@@ -9,5 +9,8 @@ project(Psd)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O3")
 
+enable_testing()
+
 add_subdirectory(src/Psd)
 add_subdirectory(src/Samples)
+add_subdirectory(tests)

@@ -24,6 +24,7 @@
 #include "../Psd/PsdLayerMaskSection.h"
 #include "../Psd/PsdImageDataSection.h"
 #include "../Psd/PsdImageResourcesSection.h"
+#include "../Psd/PsdText.h"
 #include "../Psd/PsdParseDocument.h"
 #include "../Psd/PsdParseLayerMaskSection.h"
 #include "../Psd/PsdParseImageDataSection.h"
@@ -287,6 +288,71 @@ int SampleReadPsd(void)
 		{
 			Layer* layer = &layerMaskSection->layers[i];
 			ExtractLayer(document, &file, &allocator, layer);
+
+			if (layer->text)
+			{
+				std::ostringstream textInfo;
+				textInfo << "Text layer \"" << layer->name.c_str() << "\"";
+				textInfo << " box(" << layer->text->boxLeft << "," << layer->text->boxTop << " - " << layer->text->boxRight << "," << layer->text->boxBottom << ")";
+				if (layer->text->fontName.GetLength() > 0u)
+				{
+					textInfo << " font=" << layer->text->fontName.c_str();
+				}
+				if (layer->text->fontPostScriptName.GetLength() > 0u)
+				{
+					textInfo << " psName=" << layer->text->fontPostScriptName.c_str();
+				}
+				if (layer->text->fauxBold || layer->text->fauxItalic)
+				{
+					textInfo << " style=";
+					if (layer->text->fauxBold)
+					{
+						textInfo << "bold";
+					}
+					if (layer->text->fauxItalic)
+					{
+						if (layer->text->fauxBold)
+							textInfo << ",";
+						textInfo << "italic";
+					}
+				}
+				if (layer->text->text.GetLength() > 0u)
+				{
+					textInfo << " text=\"" << layer->text->text.c_str() << "\"";
+				}
+				textInfo << "\n";
+				PSD_SAMPLE_LOG(textInfo.str().c_str());
+
+				if (layer->text->styleRunCount > 0u)
+				{
+					for (uint32_t r = 0u; r < layer->text->styleRunCount; ++r)
+					{
+						const LayerText::StyleRun& run = layer->text->styleRuns[r];
+						std::ostringstream runInfo;
+						runInfo << "  run " << r << " [" << run.start << "+" << run.length << "]";
+						if (run.fontName.GetLength() > 0u)
+							runInfo << " font=" << run.fontName.c_str();
+						if (run.fontPostScriptName.GetLength() > 0u)
+							runInfo << " psName=" << run.fontPostScriptName.c_str();
+						if (run.fontSize > 0.0f)
+							runInfo << " size=" << run.fontSize;
+						if (run.fauxBold || run.fauxItalic)
+						{
+							runInfo << " style=";
+							if (run.fauxBold)
+								runInfo << "bold";
+							if (run.fauxItalic)
+							{
+								if (run.fauxBold)
+									runInfo << ",";
+								runInfo << "italic";
+							}
+						}
+						runInfo << "\n";
+						PSD_SAMPLE_LOG(runInfo.str().c_str());
+					}
+				}
+			}
 
 			// check availability of R, G, B, and A channels.
 			// we need to determine the indices of channels individually, because there is no guarantee that R is the first channel,
@@ -823,7 +889,7 @@ int SampleWritePsd(void)
 #if _WIN32
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPTSTR, int)
 #else
-int main(int /*argc*/, const char * /*argv[]*/)
+int main(int /*argc*/, char** /*argv*/)
 #endif
 {
 	{

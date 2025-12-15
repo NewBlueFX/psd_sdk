@@ -10,6 +10,8 @@
 #include "PsdChannelType.h"
 #include "PsdLayerMask.h"
 #include "PsdVectorMask.h"
+#include "PsdText.h"
+#include "PsdTextParser.h"
 #include "PsdCompressionType.h"
 #include "PsdLayerType.h"
 #include "PsdFile.h"
@@ -25,13 +27,31 @@
 #include "Psdminiz.h"
 #include "Psdinttypes.h"
 #include "PsdLog.h"
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 
 PSD_NAMESPACE_BEGIN
 
 namespace
 {
+	struct TextDescriptorData
+	{
+		util::FixedSizeString text;
+		std::string engineData;
+	};
+
+	struct StyleSheet
+	{
+		util::FixedSizeString fontName;
+		util::FixedSizeString fontPostScriptName;
+		float32_t fontSize;
+		bool fauxBold;
+		bool fauxItalic;
+	};
+
 	struct MaskData
 	{
 		int32_t top;
@@ -193,6 +213,578 @@ namespace
 
 		// this is a color channel which has the same size as the layer
 		return GetExtents(layer, width, height);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static uint16_t ReadBEUint16(const uint8_t*& ptr, const uint8_t* end)
+	{
+		if (ptr + sizeof(uint16_t) > end)
+			return 0u;
+
+		uint16_t value;
+		memcpy(&value, ptr, sizeof(uint16_t));
+		ptr += sizeof(uint16_t);
+		return endianUtil::BigEndianToNative(value);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static uint32_t ReadBEUint32(const uint8_t*& ptr, const uint8_t* end)
+	{
+		if (ptr + sizeof(uint32_t) > end)
+			return 0u;
+
+		uint32_t value;
+		memcpy(&value, ptr, sizeof(uint32_t));
+		ptr += sizeof(uint32_t);
+		return endianUtil::BigEndianToNative(value);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static int32_t ReadBEInt32(const uint8_t*& ptr, const uint8_t* end)
+	{
+		return static_cast<int32_t>(ReadBEUint32(ptr, end));
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static float64_t ReadBEDouble(const uint8_t*& ptr, const uint8_t* end)
+	{
+		if (ptr + sizeof(uint64_t) > end)
+			return 0.0;
+
+		uint64_t bits;
+		memcpy(&bits, ptr, sizeof(uint64_t));
+		ptr += sizeof(uint64_t);
+		bits = endianUtil::BigEndianToNative(bits);
+
+		float64_t value;
+		memcpy(&value, &bits, sizeof(float64_t));
+		return value;
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void AppendChar(util::FixedSizeString& target, char c)
+	{
+		target.Append(&c, 1u);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ReadUnicodeString(const uint8_t*& ptr, const uint8_t* end, util::FixedSizeString& out)
+	{
+		out.Clear();
+		const uint32_t length = ReadBEUint32(ptr, end);
+		const uint32_t maxChars = static_cast<uint32_t>(util::FixedSizeString::CAPACITY - 1u);
+		const uint32_t charsToStore = (length > maxChars) ? maxChars : length;
+
+		for (uint32_t i=0; i < charsToStore && (ptr + sizeof(uint16_t) <= end); ++i)
+		{
+			const uint16_t ch = ReadBEUint16(ptr, end);
+			if (ch <= 0x7fu)
+			{
+				AppendChar(out, static_cast<char>(ch));
+			}
+			else
+			{
+				AppendChar(out, '?');
+			}
+		}
+
+		// skip the remainder if the string was longer than what we can store
+		const uint32_t remaining = (length > charsToStore) ? (length - charsToStore) : 0u;
+		const uint64_t bytesToSkip = static_cast<uint64_t>(remaining) * sizeof(uint16_t);
+		if (ptr + bytesToSkip <= end)
+		{
+			ptr += bytesToSkip;
+		}
+		else
+		{
+			ptr = end;
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static std::string ReadClassId(const uint8_t*& ptr, const uint8_t* end)
+	{
+		const uint32_t length = ReadBEUint32(ptr, end);
+		if (length == 0u)
+		{
+			if (ptr + 4u > end)
+				return std::string();
+
+			std::string id(reinterpret_cast<const char*>(ptr), 4u);
+			ptr += 4u;
+			return id;
+		}
+
+		if (ptr + length > end)
+			return std::string();
+
+		std::string id(reinterpret_cast<const char*>(ptr), length);
+		ptr += length;
+		return id;
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void SkipUnitFloat(const uint8_t*& ptr, const uint8_t* end)
+	{
+		// units (4 bytes) + value (8 bytes)
+		const uint64_t bytesLeft = static_cast<uint64_t>(end - ptr);
+		if (bytesLeft >= 12u)
+		{
+			ptr += 12u;
+		}
+		else
+		{
+			ptr = end;
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ExtractFontData(const std::string& engineData, LayerText* text)
+	{
+		if (text == nullptr)
+			return;
+
+		const char* fontNameKey = "/FontName (";
+		const char* postScriptKey = "/FontPostScriptName (";
+		const char* fauxBoldKey = "/FauxBold true";
+		const char* fauxItalicKey = "/FauxItalic true";
+
+		const size_t namePos = engineData.find(fontNameKey);
+		if (namePos != std::string::npos)
+		{
+			const size_t start = namePos + strlen(fontNameKey);
+			const size_t endPos = engineData.find(')', start);
+			if (endPos != std::string::npos)
+			{
+				const size_t count = endPos - start;
+				if (count > 0u)
+				{
+					text->fontName.Clear();
+					const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
+					text->fontName.Append(engineData.c_str() + start, capped);
+				}
+			}
+		}
+
+		const size_t psPos = engineData.find(postScriptKey);
+		if (psPos != std::string::npos)
+		{
+			const size_t start = psPos + strlen(postScriptKey);
+			const size_t endPos = engineData.find(')', start);
+			if (endPos != std::string::npos)
+			{
+				const size_t count = endPos - start;
+				if (count > 0u)
+				{
+					text->fontPostScriptName.Clear();
+					const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
+					text->fontPostScriptName.Append(engineData.c_str() + start, capped);
+				}
+			}
+		}
+
+		text->fauxBold = (engineData.find(fauxBoldKey) != std::string::npos);
+		text->fauxItalic = (engineData.find(fauxItalicKey) != std::string::npos);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractStringToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd, util::FixedSizeString& out)
+	{
+		const size_t pos = data.find(token, blockStart);
+		if (pos == std::string::npos || pos >= blockEnd)
+			return false;
+
+		const size_t start = pos + strlen(token);
+		const size_t end = data.find(')', start);
+		if (end == std::string::npos || end > blockEnd || end <= start)
+			return false;
+
+		const size_t count = end - start;
+		const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
+		out.Clear();
+		out.Append(data.c_str() + start, capped);
+		return true;
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractBoolToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd)
+	{
+		const size_t pos = data.find(token, blockStart);
+		return (pos != std::string::npos && pos < blockEnd);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractFloatToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd, float32_t& out)
+	{
+		const size_t pos = data.find(token, blockStart);
+		if (pos == std::string::npos || pos >= blockEnd)
+			return false;
+
+		const size_t start = pos + strlen(token);
+		if (start >= data.size())
+			return false;
+
+		char* endPtr = nullptr;
+		out = static_cast<float32_t>(strtod(data.c_str() + start, &endPtr));
+		const size_t parsedPos = static_cast<size_t>(endPtr - data.c_str());
+		return (parsedPos > start && parsedPos <= blockEnd);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseStyleSheetSet(const std::string& engineData, std::vector<StyleSheet>& sheets)
+	{
+		const size_t tag = engineData.find("/StyleSheetSet");
+		if (tag == std::string::npos)
+			return;
+
+		const size_t arrayStart = engineData.find('[', tag);
+		const size_t arrayEnd = engineData.find(']', arrayStart == std::string::npos ? tag : arrayStart);
+		if (arrayStart == std::string::npos || arrayEnd == std::string::npos)
+			return;
+
+		size_t cur = engineData.find('{', arrayStart);
+		while (cur != std::string::npos && cur < arrayEnd)
+		{
+			const size_t blockEnd = engineData.find('}', cur);
+			if (blockEnd == std::string::npos || blockEnd > arrayEnd)
+				break;
+
+			StyleSheet sheet = {};
+			sheet.fontSize = 0.0f;
+			sheet.fauxBold = false;
+			sheet.fauxItalic = false;
+
+			ExtractStringToken(engineData, "/FontName (", cur, blockEnd, sheet.fontName);
+			ExtractStringToken(engineData, "/FontPostScriptName (", cur, blockEnd, sheet.fontPostScriptName);
+			ExtractFloatToken(engineData, "/FontSize ", cur, blockEnd, sheet.fontSize);
+			sheet.fauxBold = ExtractBoolToken(engineData, "/FauxBold true", cur, blockEnd);
+			sheet.fauxItalic = ExtractBoolToken(engineData, "/FauxItalic true", cur, blockEnd);
+
+			sheets.push_back(sheet);
+			cur = engineData.find('{', blockEnd);
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseRunArray(const std::string& engineData, std::vector<uint32_t>& runSheetIndices)
+	{
+		const size_t tag = engineData.find("/RunArray");
+		if (tag == std::string::npos)
+			return;
+
+		const size_t arrayStart = engineData.find('[', tag);
+		const size_t arrayEnd = engineData.find(']', arrayStart == std::string::npos ? tag : arrayStart);
+		if (arrayStart == std::string::npos || arrayEnd == std::string::npos)
+			return;
+
+		size_t cur = engineData.find('{', arrayStart);
+		while (cur != std::string::npos && cur < arrayEnd)
+		{
+			const size_t blockEnd = engineData.find('}', cur);
+			if (blockEnd == std::string::npos || blockEnd > arrayEnd)
+				break;
+
+			const size_t stylePos = engineData.find("/StyleSheet ", cur);
+			if (stylePos != std::string::npos && stylePos < blockEnd)
+			{
+				const size_t start = stylePos + strlen("/StyleSheet ");
+				char* endPtr = nullptr;
+				const uint32_t value = static_cast<uint32_t>(strtoul(engineData.c_str() + start, &endPtr, 10));
+				if (endPtr && static_cast<size_t>(endPtr - engineData.c_str()) <= blockEnd)
+				{
+					runSheetIndices.push_back(value);
+				}
+			}
+
+			cur = engineData.find('{', blockEnd);
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseRunLengthArray(const std::string& engineData, std::vector<uint32_t>& runLengths)
+	{
+		const size_t tag = engineData.find("/RunLengthArray");
+		if (tag == std::string::npos)
+			return;
+
+		const size_t arrayStart = engineData.find('[', tag);
+		const size_t arrayEnd = engineData.find(']', arrayStart == std::string::npos ? tag : arrayStart);
+		if (arrayStart == std::string::npos || arrayEnd == std::string::npos)
+			return;
+
+		size_t pos = arrayStart + 1u;
+		while (pos < arrayEnd)
+		{
+			char* endPtr = nullptr;
+			const uint32_t value = static_cast<uint32_t>(strtoul(engineData.c_str() + pos, &endPtr, 10));
+			if (!endPtr || endPtr == engineData.c_str() + pos)
+				break;
+
+			runLengths.push_back(value);
+			pos = static_cast<size_t>(endPtr - engineData.c_str());
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseEngineStyleRunsInternal(const std::string& engineData, Layer* layer, Allocator* allocator)
+	{
+		if (!layer || !layer->text || !allocator)
+			return;
+
+		// reset previous runs, if any
+		memoryUtil::FreeArray(allocator, layer->text->styleRuns);
+		layer->text->styleRuns = nullptr;
+		layer->text->styleRunCount = 0u;
+
+		std::vector<StyleSheet> sheets;
+		ParseStyleSheetSet(engineData, sheets);
+
+		std::vector<uint32_t> runSheetIndices;
+		ParseRunArray(engineData, runSheetIndices);
+
+		std::vector<uint32_t> runLengths;
+		ParseRunLengthArray(engineData, runLengths);
+
+		const size_t runCount = runSheetIndices.size();
+		if (runCount == 0u || runCount != runLengths.size())
+			return;
+
+		if (sheets.empty())
+			return;
+
+		if (!layer->text)
+			return;
+
+		layer->text->styleRunCount = static_cast<uint32_t>(runCount);
+		layer->text->styleRuns = memoryUtil::AllocateArray<LayerText::StyleRun>(allocator, runCount);
+
+		uint32_t cursor = 0u;
+		for (size_t i=0; i < runCount; ++i)
+		{
+			const uint32_t sheetIndex = runSheetIndices[i];
+			const StyleSheet& sheet = (sheetIndex < sheets.size()) ? sheets[sheetIndex] : sheets.back();
+
+			LayerText::StyleRun* run = &layer->text->styleRuns[i];
+			run->start = cursor;
+			run->length = runLengths[i];
+			run->fontName = sheet.fontName;
+			run->fontPostScriptName = sheet.fontPostScriptName;
+			run->fontSize = sheet.fontSize;
+			run->fauxBold = sheet.fauxBold;
+			run->fauxItalic = sheet.fauxItalic;
+
+			cursor += run->length;
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseDescriptorValue(const uint8_t*& ptr, const uint8_t* end, uint32_t type, const std::string& key, TextDescriptorData& out)
+	{
+		switch (type)
+		{
+			case util::Key<'T', 'E', 'X', 'T'>::VALUE:
+			{
+				if (key == "Txt ")
+				{
+					ReadUnicodeString(ptr, end, out.text);
+				}
+				else
+				{
+					util::FixedSizeString unusedText;
+					ReadUnicodeString(ptr, end, unusedText);
+				}
+				break;
+			}
+			case util::Key<'t', 'd', 't', 'a'>::VALUE:
+			{
+				const uint32_t len = ReadBEUint32(ptr, end);
+				const uint64_t remaining = static_cast<uint64_t>(end - ptr);
+				const uint32_t toCopy = static_cast<uint32_t>(len > remaining ? remaining : len);
+				if (key == "EngineData")
+				{
+					out.engineData.assign(reinterpret_cast<const char*>(ptr), toCopy);
+				}
+				ptr += len;
+				if (ptr > end)
+				{
+					ptr = end;
+				}
+				break;
+			}
+			case util::Key<'l', 'o', 'n', 'g'>::VALUE:
+			{
+				ReadBEInt32(ptr, end);
+				break;
+			}
+			case util::Key<'b', 'o', 'o', 'l'>::VALUE:
+			{
+				if (ptr < end)
+					++ptr;
+				break;
+			}
+			case util::Key<'d', 'o', 'u', 'b'>::VALUE:
+			{
+				ReadBEDouble(ptr, end);
+				break;
+			}
+			case util::Key<'U', 'n', 't', 'F'>::VALUE:
+			{
+				SkipUnitFloat(ptr, end);
+				break;
+			}
+			case util::Key<'e', 'n', 'u', 'm'>::VALUE:
+			{
+				ReadClassId(ptr, end); // type ID
+				ReadClassId(ptr, end); // enum
+				break;
+			}
+			case util::Key<'o', 'b', 'j', ' '>::VALUE:
+			{
+				ReadClassId(ptr, end);
+				ParseDescriptorValue(ptr, end, util::Key<'D', 'e', 's', 'c'>::VALUE, key, out);
+				break;
+			}
+			case util::Key<'V', 'l', 'L', 's'>::VALUE:
+			{
+				const uint32_t count = ReadBEUint32(ptr, end);
+				for (uint32_t i=0; i < count && (ptr < end); ++i)
+				{
+					const uint32_t listType = ReadBEUint32(ptr, end);
+					ParseDescriptorValue(ptr, end, listType, std::string(), out);
+				}
+				break;
+			}
+			case util::Key<'D', 'e', 's', 'c'>::VALUE:
+			{
+				util::FixedSizeString unused;
+				ReadUnicodeString(ptr, end, unused);
+				ReadClassId(ptr, end);
+				const uint32_t itemCount = ReadBEUint32(ptr, end);
+				for (uint32_t i=0; i < itemCount && (ptr < end); ++i)
+				{
+					const std::string itemKey = ReadClassId(ptr, end);
+					const uint32_t itemType = ReadBEUint32(ptr, end);
+					ParseDescriptorValue(ptr, end, itemType, itemKey, out);
+				}
+				break;
+			}
+			default:
+			{
+				// bail out if we don't know how to skip this type
+				ptr = end;
+				break;
+			}
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseDescriptor(const uint8_t*& ptr, const uint8_t* end, TextDescriptorData& out)
+	{
+		util::FixedSizeString unused;
+		ReadUnicodeString(ptr, end, unused);
+		ReadClassId(ptr, end);
+
+		const uint32_t itemCount = ReadBEUint32(ptr, end);
+		for (uint32_t i=0; i < itemCount && (ptr < end); ++i)
+		{
+			const std::string key = ReadClassId(ptr, end);
+			const uint32_t type = ReadBEUint32(ptr, end);
+			ParseDescriptorValue(ptr, end, type, key, out);
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseTypeTool(const uint8_t* data, uint32_t length, Layer* layer, Allocator* allocator)
+	{
+		if (length < sizeof(uint16_t))
+			return;
+
+		const uint8_t* ptr = data;
+		const uint8_t* end = data + length;
+
+		const uint16_t version = ReadBEUint16(ptr, end);
+		PSD_UNUSED(version);
+
+		for (unsigned int i=0; i < 6u; ++i)
+		{
+			ReadBEDouble(ptr, end);
+		}
+
+		ReadBEUint16(ptr, end);
+
+		TextDescriptorData descData;
+		descData.text.Clear();
+		ParseDescriptor(ptr, end, descData);
+
+		ReadBEUint16(ptr, end);
+		ParseDescriptor(ptr, end, descData);
+
+		const int32_t boxLeft = ReadBEInt32(ptr, end);
+		const int32_t boxTop = ReadBEInt32(ptr, end);
+		const int32_t boxRight = ReadBEInt32(ptr, end);
+		const int32_t boxBottom = ReadBEInt32(ptr, end);
+
+		if (!layer->text)
+		{
+			layer->text = memoryUtil::Allocate<LayerText>(allocator);
+			layer->text->text.Clear();
+			layer->text->fontName.Clear();
+			layer->text->fontPostScriptName.Clear();
+			layer->text->fauxBold = false;
+			layer->text->fauxItalic = false;
+			layer->text->styleRuns = nullptr;
+			layer->text->styleRunCount = 0u;
+		}
+
+		if (descData.text.GetLength() > 0u)
+		{
+			layer->text->text = descData.text;
+		}
+
+		ExtractFontData(descData.engineData, layer->text);
+		ParseEngineStyleRunsInternal(descData.engineData, layer, allocator);
+		layer->text->boxLeft = boxLeft;
+		layer->text->boxTop = boxTop;
+		layer->text->boxRight = boxRight;
+		layer->text->boxBottom = boxBottom;
 	}
 
 
@@ -525,10 +1117,12 @@ namespace
 				Layer* layer = &layerMaskSection->layers[i];
 				layer->parent = nullptr;
 				layer->utf16Name = nullptr;
+				layer->text = nullptr;
 				layer->layerMask = nullptr;
 				layer->vectorMask = nullptr;
 				layer->type = layerType::ANY;
 				layer->isPassThrough = false;
+				layer->text = nullptr;
 
 				layer->top = fileUtil::ReadFromFileBE<int32_t>(reader);
 				layer->left = fileUtil::ReadFromFileBE<int32_t>(reader);
@@ -739,6 +1333,12 @@ namespace
 
 						// skip possible padding bytes
 						reader.Skip(length - 4u - characterCountWithoutNull * sizeof(uint16_t));
+					}
+					else if (key == util::Key<'T', 'y', 'S', 'h'>::VALUE)
+					{
+						std::vector<uint8_t> buffer(length);
+						reader.Read(buffer.data(), length);
+						ParseTypeTool(buffer.data(), length, layer, allocator);
 					}
 					else
 					{
@@ -1071,6 +1671,14 @@ void ExtractLayer(const Document* document, File* file, Allocator* allocator, La
 
 // ---------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------------
+void ParseEngineStyleRuns(const std::string& engineData, Layer* layer, Allocator* allocator)
+{
+	ParseEngineStyleRunsInternal(engineData, layer, allocator);
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
 void DestroyLayerMaskSection(LayerMaskSection*& section, Allocator* allocator)
 {
 	PSD_ASSERT_NOT_NULL(section);
@@ -1100,6 +1708,12 @@ void DestroyLayerMaskSection(LayerMaskSection*& section, Allocator* allocator)
 			allocator->Free(layer->vectorMask->data);
 		}
 		memoryUtil::Free(allocator, layer->vectorMask);
+
+		if (layer->text)
+		{
+			memoryUtil::FreeArray(allocator, layer->text->styleRuns);
+		}
+		memoryUtil::Free(allocator, layer->text);
 	}
 	memoryUtil::FreeArray(allocator, section->layers);
 	memoryUtil::Free(allocator, section);
