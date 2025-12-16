@@ -320,6 +320,23 @@ int SampleReadPsd(void)
 				{
 					textInfo << " text=\"" << layer->text->text.c_str() << "\"";
 				}
+				if (layer->text->paragraphJustification >= 0)
+				{
+					const int32_t just = layer->text->paragraphJustification;
+					const char* justStr = "unknown";
+					switch (just)
+					{
+						case 0: justStr = "left"; break;
+						case 1: justStr = "right"; break;
+						case 2: justStr = "center"; break;
+						case 3: justStr = "justify"; break;
+						case 4: justStr = "justifyLeft"; break;
+						case 5: justStr = "justifyRight"; break;
+						case 6: justStr = "justifyCenter"; break;
+						default: break;
+					}
+					textInfo << " align=" << justStr;
+				}
 				textInfo << "\n";
 				PSD_SAMPLE_LOG(textInfo.str().c_str());
 

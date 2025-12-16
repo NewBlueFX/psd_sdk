@@ -13,6 +13,7 @@ struct TransparencyMask;
 struct LayerMask;
 struct VectorMask;
 struct LayerText;
+struct PlacedLayer;
 
 
 /// \ingroup Types
@@ -25,6 +26,7 @@ struct Layer
 	util::FixedSizeString name;			///< The ASCII name of the layer. Truncated to 31 characters in PSD files.
 	uint16_t* utf16Name;				///< The UTF16 name of the layer.
 	struct LayerText* text;				///< Optional text metadata for type layers.
+	struct PlacedLayer* placed;			///< Optional placed/embedded asset data (EPS/PDF/etc).
 
 	int32_t top;						///< Top coordinate of the rectangle that encloses the layer.
 	int32_t left;						///< Left coordinate of the rectangle that encloses the layer.

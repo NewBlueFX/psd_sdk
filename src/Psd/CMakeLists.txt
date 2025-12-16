@@ -98,6 +98,7 @@ set(psd_source_types
   PsdVectorMask.h
   PsdText.h
   PsdTextParser.h
+  PsdPlacedLayer.h
 )
 
 set(psd_source_util

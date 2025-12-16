@@ -12,6 +12,7 @@
 #include "PsdVectorMask.h"
 #include "PsdText.h"
 #include "PsdTextParser.h"
+#include "PsdPlacedLayer.h"
 #include "PsdCompressionType.h"
 #include "PsdLayerType.h"
 #include "PsdFile.h"
@@ -280,6 +281,50 @@ namespace
 
 	// ---------------------------------------------------------------------------------------------------------------------
 	// ---------------------------------------------------------------------------------------------------------------------
+	static void AssignPossiblyUtf16String(const char* src, size_t count, util::FixedSizeString& out)
+	{
+		out.Clear();
+		if (count >= 2u && static_cast<uint8_t>(src[0]) == 0xFEu && static_cast<uint8_t>(src[1]) == 0xFFu)
+		{
+			for (size_t i = 2u; i + 1u < count; i += 2u)
+			{
+				const uint16_t codeUnit = static_cast<uint8_t>(src[i]) << 8 | static_cast<uint8_t>(src[i+1]);
+				if (codeUnit <= 0x7Fu)
+					AppendChar(out, static_cast<char>(codeUnit));
+				else
+					AppendChar(out, '?');
+				if (out.GetLength() >= util::FixedSizeString::CAPACITY - 1u)
+					break;
+			}
+		}
+		else
+		{
+			const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
+			out.Append(src, capped);
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractStringToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd, util::FixedSizeString& out)
+	{
+		const size_t pos = data.find(token, blockStart);
+		if (pos == std::string::npos || pos >= blockEnd)
+			return false;
+
+		const size_t start = pos + strlen(token);
+		const size_t end = data.find(')', start);
+		if (end == std::string::npos || end > blockEnd || end <= start)
+			return false;
+
+		const size_t count = end - start;
+		AssignPossiblyUtf16String(data.c_str() + start, count, out);
+		return true;
+	}
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
 	static void ReadUnicodeString(const uint8_t*& ptr, const uint8_t* end, util::FixedSizeString& out)
 	{
 		out.Clear();
@@ -408,27 +453,51 @@ namespace
 
 	// ---------------------------------------------------------------------------------------------------------------------
 	// ---------------------------------------------------------------------------------------------------------------------
-	static bool ExtractStringToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd, util::FixedSizeString& out)
+	static void ExtractTextData(const std::string& engineData, LayerText* text)
 	{
-		const size_t pos = data.find(token, blockStart);
-		if (pos == std::string::npos || pos >= blockEnd)
-			return false;
+		if (!text)
+			return;
 
-		const size_t start = pos + strlen(token);
-		const size_t end = data.find(')', start);
-		if (end == std::string::npos || end > blockEnd || end <= start)
-			return false;
+		// crude parse of EngineData's /Text (...) entry
+		const char* textKey = "/Text (";
+		const size_t pos = engineData.find(textKey);
+		if (pos == std::string::npos)
+			return;
 
-		const size_t count = end - start;
-		const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
-		out.Clear();
-		out.Append(data.c_str() + start, capped);
-		return true;
+		const size_t start = pos + strlen(textKey);
+		const size_t endPos = engineData.find(')', start);
+		if (endPos == std::string::npos || endPos <= start)
+			return;
+
+		const size_t count = endPos - start;
+		text->text.Clear();
+		const char* src = engineData.c_str() + start;
+		if (count >= 2u && static_cast<uint8_t>(src[0]) == 0xFEu && static_cast<uint8_t>(src[1]) == 0xFFu)
+		{
+			// UTF-16 BE content inside parentheses
+			for (size_t i = 2u; i + 1u < count; i += 2u)
+			{
+				const uint16_t codeUnit = static_cast<uint8_t>(src[i]) << 8 | static_cast<uint8_t>(src[i+1]);
+				if (codeUnit <= 0x7Fu)
+				{
+					AppendChar(text->text, static_cast<char>(codeUnit));
+				}
+				else
+				{
+					AppendChar(text->text, '?');
+				}
+				if (text->text.GetLength() >= util::FixedSizeString::CAPACITY - 1u)
+					break;
+			}
+		}
+		else
+		{
+			const size_t capped = (count < util::FixedSizeString::CAPACITY) ? count : util::FixedSizeString::CAPACITY - 1u;
+			text->text.Append(src, capped);
+		}
 	}
 
 
-	// ---------------------------------------------------------------------------------------------------------------------
-	// ---------------------------------------------------------------------------------------------------------------------
 	static bool ExtractBoolToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd)
 	{
 		const size_t pos = data.find(token, blockStart);
@@ -450,6 +519,25 @@ namespace
 
 		char* endPtr = nullptr;
 		out = static_cast<float32_t>(strtod(data.c_str() + start, &endPtr));
+		const size_t parsedPos = static_cast<size_t>(endPtr - data.c_str());
+		return (parsedPos > start && parsedPos <= blockEnd);
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractIntToken(const std::string& data, const char* token, size_t blockStart, size_t blockEnd, int32_t& out)
+	{
+		const size_t pos = data.find(token, blockStart);
+		if (pos == std::string::npos || pos >= blockEnd)
+			return false;
+
+		const size_t start = pos + strlen(token);
+		if (start >= data.size())
+			return false;
+
+		char* endPtr = nullptr;
+		out = static_cast<int32_t>(strtol(data.c_str() + start, &endPtr, 10));
 		const size_t parsedPos = static_cast<size_t>(endPtr - data.c_str());
 		return (parsedPos > start && parsedPos <= blockEnd);
 	}
@@ -553,6 +641,70 @@ namespace
 			runLengths.push_back(value);
 			pos = static_cast<size_t>(endPtr - engineData.c_str());
 		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseParagraphJustification(const std::string& engineData, Layer* layer)
+	{
+		if (!layer || !layer->text)
+			return;
+
+		const size_t tag = engineData.find("/ParagraphSheetSet");
+		if (tag == std::string::npos)
+			return;
+
+		const size_t arrayStart = engineData.find('[', tag);
+		const size_t arrayEnd = engineData.find(']', arrayStart == std::string::npos ? tag : arrayStart);
+		if (arrayStart == std::string::npos || arrayEnd == std::string::npos)
+			return;
+
+		const size_t blockStart = engineData.find('{', arrayStart);
+		const size_t blockEnd = engineData.find('}', blockStart == std::string::npos ? arrayStart : blockStart);
+		if (blockStart == std::string::npos || blockEnd == std::string::npos || blockEnd > arrayEnd)
+			return;
+
+		int32_t justification = -1;
+		if (ExtractIntToken(engineData, "/Justification ", blockStart, blockEnd, justification))
+		{
+			layer->text->paragraphJustification = justification;
+		}
+		else
+		{
+			// fallback: search globally
+			int32_t globalJust = -1;
+			if (ExtractIntToken(engineData, "/Justification ", 0u, engineData.size(), globalJust))
+			{
+				layer->text->paragraphJustification = globalJust;
+			}
+		}
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParseFontSet(const std::string& engineData, LayerText* text)
+	{
+		if (!text || text->fontName.GetLength() > 0u)
+			return;
+
+		const size_t tag = engineData.find("/FontSet");
+		if (tag == std::string::npos)
+			return;
+
+		const size_t namePos = engineData.find("/Name (", tag);
+		if (namePos == std::string::npos)
+			return;
+
+		// find closing ')'
+		const size_t start = namePos + strlen("/Name (");
+		const size_t end = engineData.find(')', start);
+		if (end == std::string::npos || end <= start)
+			return;
+
+		const size_t count = end - start;
+		AssignPossiblyUtf16String(engineData.c_str() + start, count, text->fontName);
 	}
 
 
@@ -770,6 +922,7 @@ namespace
 			layer->text->fontPostScriptName.Clear();
 			layer->text->fauxBold = false;
 			layer->text->fauxItalic = false;
+			layer->text->paragraphJustification = -1;
 			layer->text->styleRuns = nullptr;
 			layer->text->styleRunCount = 0u;
 		}
@@ -780,11 +933,110 @@ namespace
 		}
 
 		ExtractFontData(descData.engineData, layer->text);
+		ParseFontSet(descData.engineData, layer->text);
+		if (layer->text->text.GetLength() == 0u)
+		{
+			ExtractTextData(descData.engineData, layer->text);
+		}
 		ParseEngineStyleRunsInternal(descData.engineData, layer, allocator);
+		ParseParagraphJustification(descData.engineData, layer);
+
+		if (layer->text->fontName.GetLength() == 0u && layer->text->styleRunCount > 0u)
+		{
+			layer->text->fontName = layer->text->styleRuns[0].fontName;
+		}
+		if (layer->text->fontPostScriptName.GetLength() == 0u && layer->text->styleRunCount > 0u)
+		{
+			layer->text->fontPostScriptName = layer->text->styleRuns[0].fontPostScriptName;
+		}
+
+		// fallback scan over raw buffer in case descriptor parsing missed fields
+		if (layer->text->text.GetLength() == 0u || layer->text->fontName.GetLength() == 0u || layer->text->paragraphJustification < 0)
+		{
+			std::string raw(reinterpret_cast<const char*>(data), length);
+			if (layer->text->text.GetLength() == 0u)
+				ExtractTextData(raw, layer->text);
+			if (layer->text->fontName.GetLength() == 0u)
+			{
+				ExtractFontData(raw, layer->text);
+				ParseFontSet(raw, layer->text);
+			}
+			if (layer->text->paragraphJustification < 0)
+			{
+				int32_t just = -1;
+				if (ExtractIntToken(raw, "/Justification ", 0u, raw.size(), just))
+				{
+					layer->text->paragraphJustification = just;
+				}
+			}
+		}
+
 		layer->text->boxLeft = boxLeft;
 		layer->text->boxTop = boxTop;
 		layer->text->boxRight = boxRight;
 		layer->text->boxBottom = boxBottom;
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	static void ParsePlacedLayer(const uint8_t* data, uint32_t length, Layer* layer, Allocator* allocator)
+	{
+		if (!layer || !allocator || length == 0u)
+			return;
+
+		if (!layer->placed)
+		{
+			layer->placed = memoryUtil::Allocate<PlacedLayer>(allocator);
+			layer->placed->type = 0u;
+			layer->placed->uid.Clear();
+			layer->placed->data = nullptr;
+			layer->placed->dataSize = 0u;
+		}
+
+		// best effort parse: Photoshop stores a type (int32), version (int32), and a Pascal/Unicode ID before the payload.
+		const uint8_t* ptr = data;
+		const uint8_t* end = data + length;
+
+		if (ptr + sizeof(uint32_t) <= end)
+		{
+			layer->placed->type = ReadBEUint32(ptr, end);
+		}
+
+		// skip version
+		ReadBEUint32(ptr, end);
+
+		// Attempt to read a Unicode string UID (count + chars)
+		if (ptr + sizeof(uint32_t) <= end)
+		{
+			const uint32_t uidLength = ReadBEUint32(ptr, end);
+			const uint32_t capped = (uidLength < util::FixedSizeString::CAPACITY) ? uidLength : util::FixedSizeString::CAPACITY - 1u;
+			layer->placed->uid.Clear();
+			for (uint32_t i=0; i < capped && (ptr + sizeof(uint16_t) <= end); ++i)
+			{
+				const uint16_t ch = ReadBEUint16(ptr, end);
+				if (ch <= 0x7fu)
+					AppendChar(layer->placed->uid, static_cast<char>(ch));
+				else
+					AppendChar(layer->placed->uid, '?');
+			}
+
+			// skip remaining characters if UID was longer
+			const uint64_t remainingUidBytes = static_cast<uint64_t>(uidLength > capped ? uidLength - capped : 0u) * sizeof(uint16_t);
+			if (ptr + remainingUidBytes <= end)
+				ptr += remainingUidBytes;
+			else
+				ptr = end;
+		}
+
+		// Remaining bytes are treated as raw placed data.
+		const uint32_t payloadSize = static_cast<uint32_t>(end - ptr);
+		if (payloadSize > 0u)
+		{
+			layer->placed->data = static_cast<uint8_t*>(allocator->Allocate(payloadSize, 1u));
+			layer->placed->dataSize = payloadSize;
+			memcpy(layer->placed->data, ptr, payloadSize);
+		}
 	}
 
 
@@ -1123,6 +1375,7 @@ namespace
 				layer->type = layerType::ANY;
 				layer->isPassThrough = false;
 				layer->text = nullptr;
+				layer->placed = nullptr;
 
 				layer->top = fileUtil::ReadFromFileBE<int32_t>(reader);
 				layer->left = fileUtil::ReadFromFileBE<int32_t>(reader);
@@ -1339,6 +1592,12 @@ namespace
 						std::vector<uint8_t> buffer(length);
 						reader.Read(buffer.data(), length);
 						ParseTypeTool(buffer.data(), length, layer, allocator);
+					}
+					else if (key == util::Key<'S', 'o', 'L', 'd'>::VALUE || key == util::Key<'p', 'l', 'L', 'd'>::VALUE || key == util::Key<'P', 'l', 'L', 'd'>::VALUE)
+					{
+						std::vector<uint8_t> buffer(length);
+						reader.Read(buffer.data(), length);
+						ParsePlacedLayer(buffer.data(), length, layer, allocator);
 					}
 					else
 					{
@@ -1714,6 +1973,12 @@ void DestroyLayerMaskSection(LayerMaskSection*& section, Allocator* allocator)
 			memoryUtil::FreeArray(allocator, layer->text->styleRuns);
 		}
 		memoryUtil::Free(allocator, layer->text);
+
+		if (layer->placed)
+		{
+			allocator->Free(layer->placed->data);
+		}
+		memoryUtil::Free(allocator, layer->placed);
 	}
 	memoryUtil::FreeArray(allocator, section->layers);
 	memoryUtil::Free(allocator, section);

@@ -8,11 +8,35 @@
 #include "Psd/PsdMemoryUtil.h"
 #include "Psd/PsdText.h"
 #include "Psd/PsdTextParser.h"
+#include "Psd/PsdParseDocument.h"
+#include "Psd/PsdParseLayerMaskSection.h"
+#include "Psd/PsdLayerMaskSection.h"
+#if PSD_USE_MSVC
+	#include "Psd/PsdNativeFile.h"
+#elif defined(__APPLE__)
+	#include "Psd/PsdNativeFile_Mac.h"
+#else
+	#include "Psd/PsdNativeFile_Linux.h"
+#endif
 
 PSD_USING_NAMESPACE;
 
 namespace
 {
+	std::wstring MakeAssetPath(const char* name)
+	{
+		std::string filePath(__FILE__);
+		const std::string marker("PsdTextParserTests.cpp");
+		const size_t pos = filePath.find(marker);
+		if (pos != std::string::npos)
+		{
+			filePath = filePath.substr(0, pos);
+		}
+		filePath += "assets/";
+		filePath += name;
+		return std::wstring(filePath.begin(), filePath.end());
+	}
+
 	TEST(PsdTextParser, ParsesStyleRunsFromEngineData)
 	{
 		const char* engineData =
@@ -59,5 +83,43 @@ namespace
 
 		memoryUtil::FreeArray(&allocator, layer.text->styleRuns);
 		memoryUtil::Free(&allocator, layer.text);
+	}
+
+	TEST(PsdTextParser, ReadsTextLayerFromFixture)
+	{
+		MallocAllocator allocator;
+		NativeFile file(&allocator);
+
+		const std::wstring path = MakeAssetPath("text-layers-0.psd");
+		ASSERT_TRUE(file.OpenRead(path.c_str()));
+
+		Document* document = CreateDocument(&file, &allocator);
+		ASSERT_NE(document, nullptr);
+
+		LayerMaskSection* layerMask = ParseLayerMaskSection(document, &file, &allocator);
+		ASSERT_NE(layerMask, nullptr);
+
+		unsigned int textLayers = 0u;
+		for (unsigned int i = 0u; i < layerMask->layerCount; ++i)
+		{
+			Layer* layer = &layerMask->layers[i];
+			if (layer->text)
+			{
+				++textLayers;
+				std::cout << "Layer " << i << " text=\"" << layer->text->text.c_str() << "\" font=" << layer->text->fontName.c_str();
+				if (layer->text->paragraphJustification >= 0)
+					std::cout << " align=" << layer->text->paragraphJustification;
+				std::cout << " styleRuns=" << layer->text->styleRunCount;
+				std::cout << std::endl;
+			}
+		}
+
+		EXPECT_GT(textLayers, 0u);
+		// Informational: how many text layers were detected in the fixture.
+		std::cout << "Detected text layers: " << textLayers << std::endl;
+
+		DestroyLayerMaskSection(layerMask, &allocator);
+		DestroyDocument(document, &allocator);
+		file.Close();
 	}
 }

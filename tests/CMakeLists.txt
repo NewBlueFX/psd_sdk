@@ -14,6 +14,7 @@ enable_testing()
 add_executable(psd_text_parser_tests
   PsdTextParserTests.cpp
 )
+set_source_files_properties(PsdTextParserTests.cpp PROPERTIES LANGUAGE OBJCXX)
 target_link_libraries(psd_text_parser_tests
   PRIVATE
     Psd

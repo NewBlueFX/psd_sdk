@@ -19,6 +19,7 @@ struct LayerText
 	util::FixedSizeString fontPostScriptName;	///< PostScript font name if available.
 	bool fauxBold;								///< True if faux bold is requested in EngineData.
 	bool fauxItalic;							///< True if faux italic is requested in EngineData.
+	int32_t paragraphJustification;				///< -1 if unknown, otherwise Photoshop justification enum (0=left,1=right,2=center,...).
 
 	// Bounds reported by the Type Tool info block (pixels in layer space).
 	int32_t boxTop;
