@@ -13,6 +13,7 @@
 #include "PsdText.h"
 #include "PsdTextParser.h"
 #include "PsdPlacedLayer.h"
+#include "PsdColorMode.h"
 #include "PsdCompressionType.h"
 #include "PsdLayerType.h"
 #include "PsdFile.h"
@@ -51,6 +52,10 @@ namespace
 		float32_t fontSize;
 		bool fauxBold;
 		bool fauxItalic;
+		float32_t fillColorR;
+		float32_t fillColorG;
+		float32_t fillColorB;
+		float32_t fillColorA;
 	};
 
 	struct MaskData
@@ -402,6 +407,43 @@ namespace
 
 	// ---------------------------------------------------------------------------------------------------------------------
 	// ---------------------------------------------------------------------------------------------------------------------
+	static bool ExtractColorArray(const std::string& data, const char* token, size_t startSearch, float32_t* outColor, unsigned int maxComponents)
+	{
+		if (!outColor)
+			return false;
+
+		const size_t pos = data.find(token, startSearch);
+		if (pos == std::string::npos)
+			return false;
+
+		const size_t bracket = data.find('[', pos);
+		if (bracket == std::string::npos)
+			return false;
+
+		const size_t endBracket = data.find(']', bracket);
+		if (endBracket == std::string::npos || endBracket <= bracket)
+			return false;
+
+		for (unsigned int i=0; i<maxComponents; ++i)
+			outColor[i] = -1.0f;
+
+		size_t cursor = bracket + 1u;
+		unsigned int idx = 0u;
+		while (cursor < endBracket && idx < maxComponents)
+		{
+			char* endPtr = nullptr;
+			const float32_t value = static_cast<float32_t>(strtod(data.c_str() + cursor, &endPtr));
+			if (endPtr == data.c_str() + cursor)
+				break;
+			outColor[idx++] = value;
+			cursor = static_cast<size_t>(endPtr - data.c_str());
+		}
+		return idx > 0u;
+	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
 	static void ExtractFontData(const std::string& engineData, LayerText* text)
 	{
 		if (text == nullptr)
@@ -549,14 +591,19 @@ namespace
 	{
 		const size_t tag = engineData.find("/StyleSheetSet");
 		if (tag == std::string::npos)
+		{
 			return;
+		}
 
 		const size_t arrayStart = engineData.find('[', tag);
 		const size_t arrayEnd = engineData.find(']', arrayStart == std::string::npos ? tag : arrayStart);
 		if (arrayStart == std::string::npos || arrayEnd == std::string::npos)
+		{
 			return;
+		}
 
 		size_t cur = engineData.find('{', arrayStart);
+		int sheetIndex = 0;
 		while (cur != std::string::npos && cur < arrayEnd)
 		{
 			const size_t blockEnd = engineData.find('}', cur);
@@ -567,6 +614,10 @@ namespace
 			sheet.fontSize = 0.0f;
 			sheet.fauxBold = false;
 			sheet.fauxItalic = false;
+			sheet.fillColorR = -1.0f;
+			sheet.fillColorG = -1.0f;
+			sheet.fillColorB = -1.0f;
+			sheet.fillColorA = -1.0f;
 
 			ExtractStringToken(engineData, "/FontName (", cur, blockEnd, sheet.fontName);
 			ExtractStringToken(engineData, "/FontPostScriptName (", cur, blockEnd, sheet.fontPostScriptName);
@@ -574,9 +625,45 @@ namespace
 			sheet.fauxBold = ExtractBoolToken(engineData, "/FauxBold true", cur, blockEnd);
 			sheet.fauxItalic = ExtractBoolToken(engineData, "/FauxItalic true", cur, blockEnd);
 
+			// Extract fill color from FillColor dictionary
+			// Format: /FillColor << ... /Values [ R G B ] ... >>
+			const size_t fillColorPos = engineData.find("/FillColor", cur);
+			if (fillColorPos != std::string::npos && fillColorPos < blockEnd)
+			{
+				// Try with space: "/Values ["
+				size_t valuesPos = engineData.find("/Values [", fillColorPos);
+				// Try without space: "/Values["
+				if (valuesPos == std::string::npos || valuesPos >= blockEnd)
+					valuesPos = engineData.find("/Values[", fillColorPos);
+
+				if (valuesPos != std::string::npos && valuesPos < blockEnd)
+				{
+					// Skip past "/Values[" or "/Values ["
+					const char* ptr = engineData.c_str() + valuesPos;
+					while (*ptr && *ptr != '[') ptr++;
+					if (*ptr == '[') ptr++;  // Skip '['
+
+					char* endPtr = nullptr;
+					sheet.fillColorR = static_cast<float32_t>(strtod(ptr, &endPtr));
+					if (endPtr && endPtr > ptr)
+					{
+						ptr = endPtr;
+						sheet.fillColorG = static_cast<float32_t>(strtod(ptr, &endPtr));
+						if (endPtr && endPtr > ptr)
+						{
+							ptr = endPtr;
+							sheet.fillColorB = static_cast<float32_t>(strtod(ptr, &endPtr));
+							sheet.fillColorA = 1.0f; // Default to opaque
+						}
+					}
+				}
+			}
+
 			sheets.push_back(sheet);
+			sheetIndex++;
 			cur = engineData.find('{', blockEnd);
 		}
+
 	}
 
 
@@ -731,7 +818,27 @@ namespace
 
 		const size_t runCount = runSheetIndices.size();
 		if (runCount == 0u || runCount != runLengths.size())
+		{
+			// Even if we can't create style runs, copy first sheet to layer level as fallback
+			if (!sheets.empty() && layer->text)
+			{
+				const StyleSheet& firstSheet = sheets[0];
+
+				if (layer->text->fontName.GetLength() == 0u)
+					layer->text->fontName = firstSheet.fontName;
+				if (layer->text->fontPostScriptName.GetLength() == 0u)
+					layer->text->fontPostScriptName = firstSheet.fontPostScriptName;
+				// Copy color to layer level if not already set
+				if (layer->text->fillColorR < 0.0f && firstSheet.fillColorR >= 0.0f)
+				{
+					layer->text->fillColorR = firstSheet.fillColorR;
+					layer->text->fillColorG = firstSheet.fillColorG;
+					layer->text->fillColorB = firstSheet.fillColorB;
+					layer->text->fillColorA = firstSheet.fillColorA;
+				}
+			}
 			return;
+		}
 
 		if (sheets.empty())
 			return;
@@ -756,6 +863,10 @@ namespace
 			run->fontSize = sheet.fontSize;
 			run->fauxBold = sheet.fauxBold;
 			run->fauxItalic = sheet.fauxItalic;
+			run->fillColorR = sheet.fillColorR;
+			run->fillColorG = sheet.fillColorG;
+			run->fillColorB = sheet.fillColorB;
+			run->fillColorA = sheet.fillColorA;
 
 			cursor += run->length;
 		}
@@ -895,13 +1006,11 @@ namespace
 		const uint16_t version = ReadBEUint16(ptr, end);
 		PSD_UNUSED(version);
 
+		// Save transform matrix before allocating layer->text
+		float64_t transformMatrix[6];
 		for (unsigned int i=0; i < 6u; ++i)
 		{
-			const float64_t v = ReadBEDouble(ptr, end);
-			if (layer->text && i < 6u)
-			{
-				layer->text->transform[i] = v;
-			}
+			transformMatrix[i] = ReadBEDouble(ptr, end);
 		}
 
 		ReadBEUint16(ptr, end);
@@ -928,8 +1037,20 @@ namespace
 			layer->text->fauxItalic = false;
 			layer->text->paragraphJustification = -1;
 			for (unsigned int i=0; i<6u; ++i) layer->text->transform[i] = 0.0;
+			layer->text->colorSpace = colorMode::RGB;
+			for (unsigned int i=0; i<4u; ++i) layer->text->color[i] = -1.0f;
+			layer->text->fillColorR = -1.0f;
+			layer->text->fillColorG = -1.0f;
+			layer->text->fillColorB = -1.0f;
+			layer->text->fillColorA = -1.0f;
 			layer->text->styleRuns = nullptr;
 			layer->text->styleRunCount = 0u;
+		}
+
+		// Copy saved transform matrix
+		for (unsigned int i=0; i<6u; ++i)
+		{
+			layer->text->transform[i] = transformMatrix[i];
 		}
 
 		if (descData.text.GetLength() > 0u)
@@ -939,10 +1060,13 @@ namespace
 
 		ExtractFontData(descData.engineData, layer->text);
 		ParseFontSet(descData.engineData, layer->text);
+		ExtractIntToken(descData.engineData, "/ColorSpace ", 0u, descData.engineData.size(), layer->text->colorSpace);
+		ExtractColorArray(descData.engineData, "/FillColor", 0u, layer->text->color, 4u);
 		if (layer->text->text.GetLength() == 0u)
 		{
 			ExtractTextData(descData.engineData, layer->text);
 		}
+
 		ParseEngineStyleRunsInternal(descData.engineData, layer, allocator);
 		ParseParagraphJustification(descData.engineData, layer);
 
@@ -955,8 +1079,20 @@ namespace
 			layer->text->fontPostScriptName = layer->text->styleRuns[0].fontPostScriptName;
 		}
 
+		// Copy color from first style run to layer level for fallback
+		if (layer->text->fillColorR < 0.0f && layer->text->styleRunCount > 0u)
+		{
+			if (layer->text->styleRuns[0].fillColorR >= 0.0f)
+			{
+				layer->text->fillColorR = layer->text->styleRuns[0].fillColorR;
+				layer->text->fillColorG = layer->text->styleRuns[0].fillColorG;
+				layer->text->fillColorB = layer->text->styleRuns[0].fillColorB;
+				layer->text->fillColorA = layer->text->styleRuns[0].fillColorA;
+			}
+		}
+
 		// fallback scan over raw buffer in case descriptor parsing missed fields
-		if (layer->text->text.GetLength() == 0u || layer->text->fontName.GetLength() == 0u || layer->text->paragraphJustification < 0)
+		if (layer->text->text.GetLength() == 0u || layer->text->fontName.GetLength() == 0u || layer->text->paragraphJustification < 0 || layer->text->color[0] < 0.0f)
 		{
 			std::string raw(reinterpret_cast<const char*>(data), length);
 			if (layer->text->text.GetLength() == 0u)
@@ -965,6 +1101,12 @@ namespace
 			{
 				ExtractFontData(raw, layer->text);
 				ParseFontSet(raw, layer->text);
+			}
+			if (layer->text->color[0] < 0.0f)
+			{
+				if (!ExtractIntToken(raw, "/ColorSpace ", 0u, raw.size(), layer->text->colorSpace))
+					layer->text->colorSpace = colorMode::RGB;
+				ExtractColorArray(raw, "/FillColor", 0u, layer->text->color, 4u);
 			}
 			if (layer->text->paragraphJustification < 0)
 			{
@@ -1592,7 +1734,7 @@ namespace
 						// skip possible padding bytes
 						reader.Skip(length - 4u - characterCountWithoutNull * sizeof(uint16_t));
 					}
-					else if (key == util::Key<'T', 'y', 'S', 'h'>::VALUE)
+					else if (key == util::Key<'T', 'y', 'S', 'h'>::VALUE || key == util::Key<'t', 'y', 'S', 'h'>::VALUE)
 					{
 						std::vector<uint8_t> buffer(length);
 						reader.Read(buffer.data(), length);

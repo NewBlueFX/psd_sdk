@@ -110,6 +110,11 @@ namespace
 				if (layer->text->paragraphJustification >= 0)
 					std::cout << " align=" << layer->text->paragraphJustification;
 				std::cout << " styleRuns=" << layer->text->styleRunCount;
+				if (layer->text->color[0] >= 0.0)
+				{
+					std::cout << " colorSpace=" << layer->text->colorSpace;
+					std::cout << " color=[" << layer->text->color[0] << "," << layer->text->color[1] << "," << layer->text->color[2] << "," << layer->text->color[3] << "]";
+				}
 				std::cout << std::endl;
 			}
 		}

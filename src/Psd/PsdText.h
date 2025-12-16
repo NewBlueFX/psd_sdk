@@ -24,6 +24,12 @@ struct LayerText
 	bool fauxItalic;							///< True if faux italic is requested in EngineData.
 	int32_t paragraphJustification;				///< -1 if unknown, otherwise Photoshop justification enum (0=left,1=right,2=center,...).
 	float64_t transform[6];					///< TypeTool transform matrix (xx, xy, yx, yy, tx, ty) to place text in document space.
+	int32_t colorSpace;						///< PSD color space enum value (see colorMode::Enum); -1 if unknown (EngineData may be device space).
+	float32_t color[4];						///< Components in the above color space; normalized if device RGB, otherwise raw; -1 if unknown.
+	float32_t fillColorR;						///< Fill color red component [0.0, 1.0], -1 if unknown.
+	float32_t fillColorG;						///< Fill color green component [0.0, 1.0], -1 if unknown.
+	float32_t fillColorB;						///< Fill color blue component [0.0, 1.0], -1 if unknown.
+	float32_t fillColorA;						///< Fill color alpha component [0.0, 1.0], -1 if unknown.
 
 	// Bounds reported by the Type Tool info block (pixels in layer space).
 	int32_t boxTop;
@@ -41,6 +47,10 @@ struct LayerText
 		float32_t fontSize;						///< Requested font size.
 		bool fauxBold;							///< Faux bold for this run.
 		bool fauxItalic;						///< Faux italic for this run.
+		float32_t fillColorR;					///< Fill color red [0.0, 1.0], -1 if unknown.
+		float32_t fillColorG;					///< Fill color green [0.0, 1.0], -1 if unknown.
+		float32_t fillColorB;					///< Fill color blue [0.0, 1.0], -1 if unknown.
+		float32_t fillColorA;					///< Fill color alpha [0.0, 1.0], -1 if unknown.
 	};
 
 	StyleRun* styleRuns;						///< Array of style runs, if available.
