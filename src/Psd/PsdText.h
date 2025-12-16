@@ -12,6 +12,9 @@ PSD_NAMESPACE_BEGIN
 /// \ingroup Types
 /// \class LayerText
 /// \brief Minimal metadata extracted from Photoshop text layers.
+/// \details Fields map directly to Photoshop's Type Tool (TySh) additional layer info. Text is best-effort ASCII from UTF16,
+/// fonts come from EngineData and FontSet, and transforms are TySh 3x2 matrices (see Adobe PSD spec). Coordinates are
+/// in PSD pixel space, origin at top-left. paragraphJustification uses Photoshop enums (0=left,1=right,2=center,3=justify).
 struct LayerText
 {
 	util::FixedSizeString text;					///< UTF16 text converted to UTF8/ASCII where possible.
@@ -20,6 +23,7 @@ struct LayerText
 	bool fauxBold;								///< True if faux bold is requested in EngineData.
 	bool fauxItalic;							///< True if faux italic is requested in EngineData.
 	int32_t paragraphJustification;				///< -1 if unknown, otherwise Photoshop justification enum (0=left,1=right,2=center,...).
+	float64_t transform[6];					///< TypeTool transform matrix (xx, xy, yx, yy, tx, ty) to place text in document space.
 
 	// Bounds reported by the Type Tool info block (pixels in layer space).
 	int32_t boxTop;

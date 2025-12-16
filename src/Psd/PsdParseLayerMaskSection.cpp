@@ -897,7 +897,11 @@ namespace
 
 		for (unsigned int i=0; i < 6u; ++i)
 		{
-			ReadBEDouble(ptr, end);
+			const float64_t v = ReadBEDouble(ptr, end);
+			if (layer->text && i < 6u)
+			{
+				layer->text->transform[i] = v;
+			}
 		}
 
 		ReadBEUint16(ptr, end);
@@ -923,6 +927,7 @@ namespace
 			layer->text->fauxBold = false;
 			layer->text->fauxItalic = false;
 			layer->text->paragraphJustification = -1;
+			for (unsigned int i=0; i<6u; ++i) layer->text->transform[i] = 0.0;
 			layer->text->styleRuns = nullptr;
 			layer->text->styleRunCount = 0u;
 		}

@@ -292,19 +292,19 @@ int SampleReadPsd(void)
 			if (layer->text)
 			{
 				std::ostringstream textInfo;
-				textInfo << "Text layer \"" << layer->name.c_str() << "\"";
+				textInfo << "TEXT_LAYER name=\"" << layer->name.c_str() << "\"";
 				textInfo << " box(" << layer->text->boxLeft << "," << layer->text->boxTop << " - " << layer->text->boxRight << "," << layer->text->boxBottom << ")";
 				if (layer->text->fontName.GetLength() > 0u)
 				{
-					textInfo << " font=" << layer->text->fontName.c_str();
+					textInfo << " font=\"" << layer->text->fontName.c_str() << "\"";
 				}
 				if (layer->text->fontPostScriptName.GetLength() > 0u)
 				{
-					textInfo << " psName=" << layer->text->fontPostScriptName.c_str();
+					textInfo << " psName=\"" << layer->text->fontPostScriptName.c_str() << "\"";
 				}
 				if (layer->text->fauxBold || layer->text->fauxItalic)
 				{
-					textInfo << " style=";
+					textInfo << " style=\"";
 					if (layer->text->fauxBold)
 					{
 						textInfo << "bold";
@@ -315,6 +315,7 @@ int SampleReadPsd(void)
 							textInfo << ",";
 						textInfo << "italic";
 					}
+					textInfo << "\"";
 				}
 				if (layer->text->text.GetLength() > 0u)
 				{
@@ -335,8 +336,12 @@ int SampleReadPsd(void)
 						case 6: justStr = "justifyCenter"; break;
 						default: break;
 					}
-					textInfo << " align=" << justStr;
+					textInfo << " align=\"" << justStr << "\"";
 				}
+				textInfo << " transform=["
+					<< layer->text->transform[0] << "," << layer->text->transform[1] << ","
+					<< layer->text->transform[2] << "," << layer->text->transform[3] << ","
+					<< layer->text->transform[4] << "," << layer->text->transform[5] << "]";
 				textInfo << "\n";
 				PSD_SAMPLE_LOG(textInfo.str().c_str());
 
